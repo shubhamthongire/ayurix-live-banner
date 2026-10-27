@@ -9,7 +9,16 @@ FONT_PATH = "assets/PressStart2P-Regular.ttf"
 GOALS = [100, 250, 500, 1000, 2500, 5000, 10000]   # goal = first value > count
 SCALE, OFFSET = 0.3325, (71, 612)  # bar-PNG (2171x724) -> banner scale / top-left
 FILL_BOX = (350, 358, 1690, 424)   # inner track area in bar-PNG pixels
-NUM_X, NUM_Y, NUM_H, NUM_CW, NUM_GAP = 368, 250, 80, 56, 20   # left, top, height, char width, gap around "/" (bar-PNG px)
+NUM_X, NUM_Y, NUM_H, NUM_CW, NUM_GAP = 580, 351, 80, 56, 20   # left, top, height, char width, gap around "/" (bar-PNG px)
+
+# heart-only layout (no progress bar): heart sits right after the number, same line, rides the same wave
+HEART_PATH = "assets/heart.png"    # isolated heart (cut from track.png; no bar, no stars)
+HEART_H = 250                      # base heart height in bar-PNG px (number is NUM_H=80 tall)
+HEART_SIZE = (0.85, 1.25)          # random size range; seeded by the sub count -> changes whenever the count changes
+HEART_GAP = 75                     # gap between number end and heart (bar-PNG px)
+HEART_TURB = 0.05                  # fine wobble on the heart itself (fraction of its height); same random seed as the wave
+HEART_DY = 0                       # extra vertical nudge (+ = down)
+_NUM_END = 0                       # x where the number ends (set by _number_layer)
 
 # ---- look (tune these) ----
 OPACITY = 0.90                     # bar visibility
@@ -44,7 +53,7 @@ _WAVE = None             # (components, seed): drawn ONCE per render so track, n
 STAR_COUNT = 24
 STAR_SEED = None                         # None = new random layout each render; set an int to freeze it
 STAR_AREA = (40, 430, 900, 1010)         # x0,y0,x1,y1 on the banner
-STAR_KEEPOUT = (60, 664, 835, 810)       # bar + number band (taller now: bigger wave): no stars here
+STAR_KEEPOUT = (170, 670, 470, 815)       # bar + number band (taller now: bigger wave): no stars here
 STAR_BAR = (187, 636, 742)               # bar x-range + centre y on the banner (distance is measured from this)
 STAR_MIN0, STAR_MINK = 52, 0.42          # min spacing = MIN0 + MINK * distance_from_bar
 STAR_FADE = 380                          # opacity falls to ~25% around this distance (px)
@@ -224,7 +233,43 @@ def _bar_layer(count, goal):
     a = np.maximum(b[..., 3:4], pm.max(2, keepdims=True))
     rgb = np.where(a > 0, pm / np.maximum(a, 1e-6), 0)
     img = Image.fromarray((np.dstack([np.clip(rgb, 0, 1), np.clip(a, 0, 1)]) * 255).astype(np.uint8), "RGBA")
-    return _displace(img)          # track + fill share one wave; heart follows the end of it
+    return _displace(img)          # (old bar look, unused)
+
+
+def _heart_layer(count):
+    """Only the heart, beside the number: size seeded by count, tilted + lifted by the shared wave at its x."""
+    r = random.Random(count)
+    k = r.uniform(*HEART_SIZE)
+    h0 = Image.open(HEART_PATH).convert("RGBA")
+    h = round(HEART_H * k)
+    heart = h0.resize((max(1, round(h0.width * h / h0.height)), h), Image.LANCZOS)
+    size = _bar_layer_size()
+    cx = _NUM_END + HEART_GAP + heart.width / 2.0
+    cy = NUM_Y + NUM_H / 2.0 + HEART_DY
+    dy1, _ = _wave_dy(size[0])
+    xi = int(min(max(cx, 80), size[0] - 1))
+    dy = float(dy1[xi])
+    slope = float(dy1[xi] - dy1[xi - 80]) / 80.0
+    ang = float(np.clip(-np.degrees(np.arctan(slope)) * HEART_TILT, -22, 22))
+    pad = 40
+    tile = Image.new("RGBA", (heart.width + 2 * pad, heart.height + 2 * pad), (0, 0, 0, 0))
+    tile.alpha_composite(heart, (pad, pad))
+    tile = tile.rotate(ang, resample=Image.BICUBIC)
+    from scipy.ndimage import map_coordinates
+    tw, th = tile.size
+    rs = np.random.RandomState(_WAVE[1] % (2 ** 31))
+    amp = HEART_TURB * h
+    ndy, ndx = _smooth_noise((th, tw), (5, 5), rs) * amp, _smooth_noise((th, tw), (5, 5), rs) * amp
+    t = np.asarray(tile, dtype=np.float32) / 255.0
+    pm = np.dstack([t[..., :3] * t[..., 3:4], t[..., 3:4]])
+    Y, X = np.mgrid[0:th, 0:tw].astype(np.float32)
+    pm = np.dstack([map_coordinates(pm[..., i], [Y - ndy, X - ndx], order=1, mode="constant", cval=0) for i in range(4)])
+    al = pm[..., 3:4]
+    rgb = np.where(al > 1e-4, pm[..., :3] / np.maximum(al, 1e-4), 0)
+    tile = Image.fromarray((np.dstack([np.clip(rgb, 0, 1), np.clip(al, 0, 1)]) * 255).astype(np.uint8), "RGBA")
+    layer = Image.new("RGBA", size, (0, 0, 0, 0))
+    layer.alpha_composite(tile, (round(cx - tile.width / 2.0), round(cy + dy - tile.height / 2.0)))
+    return layer
 
 
 def _number_layer(size, count, goal):
@@ -247,6 +292,8 @@ def _number_layer(size, count, goal):
         s_ = seg(txt, trim)
         alpha.paste(s_, (x, NUM_Y), s_)
         x += s_.width + gap
+    global _NUM_END
+    _NUM_END = x
     return _displace_alpha(alpha)
 
 
@@ -271,7 +318,8 @@ def render_banner(count, goal=None, out_path="banner.jpg"):
     bgblur = np.asarray(bg.filter(ImageFilter.GaussianBlur(22)), dtype=np.float32) / 255.0
 
     # ---- bar ----
-    bar = _shape_to_banner(_bar_layer(count, goal), "RGBA").filter(ImageFilter.GaussianBlur(SOFTEN))
+    num_alpha = _number_layer(_bar_layer_size(), count, goal)       # first: sets _NUM_END for the heart
+    bar = _shape_to_banner(_heart_layer(count), "RGBA").filter(ImageFilter.GaussianBlur(SOFTEN))
     L = np.asarray(bar, dtype=np.float32) / 255.0
     a = L[..., 3:4]
     P = L[..., :3] * a
@@ -304,7 +352,7 @@ def render_banner(count, goal=None, out_path="banner.jpg"):
     out = 1 - (1 - np.clip(out, 0, 1)) * (1 - np.clip(sglow, 0, 1))
 
     # ---- number: light glow -> dark shadow -> white opposite shadow -> text ----
-    na = _shape_to_banner(_number_layer(_bar_layer_size(), count, goal), "L").filter(ImageFilter.GaussianBlur(0.5))
+    na = _shape_to_banner(num_alpha, "L").filter(ImageFilter.GaussianBlur(0.5))
     n = np.asarray(na, dtype=np.float32)[..., None] / 255.0
     g = NUM_GLOW
     ng = np.asarray(na.filter(ImageFilter.GaussianBlur(g["radius"])), dtype=np.float32)[..., None] / 255.0
