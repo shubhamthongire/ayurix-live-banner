@@ -35,17 +35,18 @@ DG_THRESHOLD = 80
 DG_RADII = [(22, 0.40), (55, 0.36), (110, 0.28), (210, 0.18)]
 DG_TINT, DG_WARM = 0.45, (1.0, 0.78, 0.60)
 # number = crimson glass: dark edge -> bright core, glossy top-left rim, grainy texture, tight crisp glow
-NUM_CORE = (238, 14, 56)           # crimson (centre of each stroke)
-NUM_EDGE = (120, 0, 28)            # deep crimson (stroke edges = glass thickness)
+NUM_CORE = (226, 36, 70)           # crimson (centre of each stroke), a touch softer
+NUM_EDGE = (150, 14, 44)            # deep crimson (stroke edges = glass thickness), lighter so edges are less harsh
 NUM_DEPTH = 3.0                    # blur (banner px) that sets how far the dark edge reaches into the stroke
-NUM_OPACITY = 0.97
-NUM_TEXTURE = dict(grain=0.16, mottle=0.22, seed=7)   # grain = fine noise, mottle = soft blotches (0 = off)
-NUM_SPEC = dict(dx=2, dy=2, opacity=0.95, color=(255, 236, 240))    # thin sharp white rim on the top-left edge
-NUM_SHEEN = dict(dx=1, dy=6, opacity=0.38, color=(255, 150, 170))   # soft glossy band under the top edge
-NUM_RIM_DARK = dict(dx=2, dy=2, opacity=0.55)                       # dark rim on the opposite (bottom-right) edge
-NUM_GLOW_RADII = [(2, 1.25), (5, 0.95), (12, 0.52), (28, 0.22)]     # tight + crisp -> wide + faint (screen blend)
-NUM_GLOW_COLOR = (255, 30, 72)
-NUM_SHADOW = dict(radius=3, opacity=0.55, dx=2, dy=4, color=(48, 0, 18))
+NUM_OPACITY = 0.88                 # fade: 1.0 = solid, lower = more see-through
+NUM_SOFT = 0.8                     # blur (banner px) on the number's edge: higher = softer, lower = crisper
+NUM_TEXTURE = dict(grain=0.09, mottle=0.18, seed=7)   # grain = fine noise, mottle = soft blotches (0 = off)
+NUM_SPEC = dict(dx=2, dy=2, opacity=0.50, color=(255, 236, 240))    # thin white rim on the top-left edge
+NUM_SHEEN = dict(dx=1, dy=6, opacity=0.28, color=(255, 160, 180))   # soft glossy band under the top edge
+NUM_RIM_DARK = dict(dx=2, dy=2, opacity=0.28)                       # dark rim on the opposite (bottom-right) edge
+NUM_GLOW_RADII = [(3, 0.60), (8, 0.62), (18, 0.55), (40, 0.34)]     # soft, wide, glowy (screen blend)
+NUM_GLOW_COLOR = (255, 70, 105)
+NUM_SHADOW = dict(radius=6, opacity=0.32, dx=2, dy=4, color=(70, 8, 30))
 
 
 # flowing wave: SAME strength along the whole bar (left to right), NEW random shape every render (like the stars).
@@ -426,7 +427,7 @@ def render_banner(count, goal=None, out_path="banner.jpg"):
     out = 1 - (1 - np.clip(out, 0, 1)) * (1 - np.clip(sglow, 0, 1))
 
     # ---- number: crimson glass (crisp glow -> shadow -> textured body -> glossy rims) ----
-    na = _shape_to_banner(num_alpha, "L").filter(ImageFilter.GaussianBlur(0.5))
+    na = _shape_to_banner(num_alpha, "L").filter(ImageFilter.GaussianBlur(NUM_SOFT))
     out = _paint_number(out, na)
 
     rgb8 = Image.fromarray((np.clip(out, 0, 1) * 255).astype(np.uint8), "RGB")
