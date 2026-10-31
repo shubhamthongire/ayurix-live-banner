@@ -5,11 +5,14 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 # ---- paths / geometry (measured from the AE composition) ----
 BG_PATH, TRACK_PATH, FILL_PATH = "assets/bg.png", "assets/track.png", "assets/fill.png"
-FONT_PATH = "assets/PressStart2P-Regular.ttf"
+FONT_PATH = "assets/Mostwasted.ttf"
 GOALS = [100, 250, 500, 1000, 2500, 5000, 10000]   # goal = first value > count
 SCALE, OFFSET = 0.3325, (71, 612)  # bar-PNG (2171x724) -> banner scale / top-left
 FILL_BOX = (350, 358, 1690, 424)   # inner track area in bar-PNG pixels
-NUM_X, NUM_Y, NUM_H, NUM_CW, NUM_GAP = 580, 351, 80, 56, 20   # left, top, height, char width, gap around "/" (bar-PNG px)
+NUM_X, NUM_Y, NUM_H, NUM_CW, NUM_GAP = 700, 303, 175, 105, 36   # left, top, height, char width, gap around "/" (bar-PNG px)
+FONT_SMOOTH = True    # False = pixel font (Press Start 2P, monospace, hard edges). True = normal/script font: any width, smooth edges
+FONT_TRACK = 4        # smooth fonts only: extra space between characters (bar-PNG px)
+NUM_BOLD = 3          # thickens the number: grows every stroke by this many bar-PNG px per side (0 = off). Makes thin fonts look "fat"
 
 # heart-only layout (no progress bar): heart sits right after the number, same line, rides the same wave
 HEART_PATH = "assets/heart.png"    # isolated heart (cut from track.png; no bar, no stars)
@@ -31,12 +34,18 @@ BAR_SHADOW = dict(radius=9, opacity=0.50, dx=0, dy=6, color=(36, 24, 46))   # ap
 DG_THRESHOLD = 80
 DG_RADII = [(22, 0.40), (55, 0.36), (110, 0.28), (210, 0.18)]
 DG_TINT, DG_WARM = 0.45, (1.0, 0.78, 0.60)
-# number: darker colour so it reads on bright areas, + shadow + light glow (weaker than the bar's)
-NUM_COLOR = (88, 78, 150)          # muted indigo; try (60,70,140) darker or (150,60,120) rose
-NUM_OPACITY = 0.92
-NUM_SHADOW = dict(radius=3, opacity=0.60, dx=2, dy=4, color=(28, 18, 56))
-NUM_GLOW = dict(radius=9, opacity=0.22, color=(255, 246, 255))   # light halo behind the text
-NUM_LIGHT = dict(radius=2, opacity=0.92, dx=-2, dy=-3, color=(255, 255, 255))   # white shadow on the OPPOSITE side of the dark one
+# number = crimson glass: dark edge -> bright core, glossy top-left rim, grainy texture, tight crisp glow
+NUM_CORE = (238, 14, 56)           # crimson (centre of each stroke)
+NUM_EDGE = (120, 0, 28)            # deep crimson (stroke edges = glass thickness)
+NUM_DEPTH = 3.0                    # blur (banner px) that sets how far the dark edge reaches into the stroke
+NUM_OPACITY = 0.97
+NUM_TEXTURE = dict(grain=0.16, mottle=0.22, seed=7)   # grain = fine noise, mottle = soft blotches (0 = off)
+NUM_SPEC = dict(dx=2, dy=2, opacity=0.95, color=(255, 236, 240))    # thin sharp white rim on the top-left edge
+NUM_SHEEN = dict(dx=1, dy=6, opacity=0.38, color=(255, 150, 170))   # soft glossy band under the top edge
+NUM_RIM_DARK = dict(dx=2, dy=2, opacity=0.55)                       # dark rim on the opposite (bottom-right) edge
+NUM_GLOW_RADII = [(2, 1.25), (5, 0.95), (12, 0.52), (28, 0.22)]     # tight + crisp -> wide + faint (screen blend)
+NUM_GLOW_COLOR = (255, 30, 72)
+NUM_SHADOW = dict(radius=3, opacity=0.55, dx=2, dy=4, color=(48, 0, 18))
 
 
 # flowing wave: SAME strength along the whole bar (left to right), NEW random shape every render (like the stars).
@@ -53,7 +62,7 @@ _WAVE = None             # (components, seed): drawn ONCE per render so track, n
 STAR_COUNT = 24
 STAR_SEED = None                         # None = new random layout each render; set an int to freeze it
 STAR_AREA = (40, 430, 900, 1010)         # x0,y0,x1,y1 on the banner
-STAR_KEEPOUT = (170, 670, 470, 815)       # bar + number band (taller now: bigger wave): no stars here
+STAR_KEEPOUT = (240, 610, 720, 860)       # number + heart band: no stars here
 STAR_BAR = (187, 636, 742)               # bar x-range + centre y on the banner (distance is measured from this)
 STAR_MIN0, STAR_MINK = 52, 0.42          # min spacing = MIN0 + MINK * distance_from_bar
 STAR_FADE = 380                          # opacity falls to ~25% around this distance (px)
@@ -274,31 +283,96 @@ def _heart_layer(count):
 
 def _number_layer(size, count, goal):
     """Alpha mask of "54 / 100": tighter spacing around "/", a bit larger, riding on the wave."""
-    ft = ImageFont.truetype(FONT_PATH, 72)
-    top, bot = ft.getbbox("0")[1], ft.getbbox("0")[3]
-    sx, sy = NUM_CW / 72.0, NUM_H / float(bot - top)
+    if FONT_SMOOTH:
+        ft = ImageFont.truetype(FONT_PATH, 240)
+        dtop = min(ft.getbbox(c)[1] for c in "0123456789")
+        dbot = max(ft.getbbox(c)[3] for c in "0123456789")
+        sc = NUM_H / float(dbot - dtop)                      # digits define the scale; every digit shares one baseline
 
-    def seg(txt, trim):
-        t = Image.new("L", (72 * len(txt) + 8, 96), 0)
-        ImageDraw.Draw(t).text((0, 0), txt, font=ft, fill=255)
-        t = t.crop((0, top, 72 * len(txt), bot))
-        if trim:
-            t = t.crop(t.getbbox())
-        return t.resize((max(1, round(t.width * sx)), NUM_H), Image.NEAREST)
+        def seg(txt, trim):
+            boxes = [ft.getbbox(c) for c in txt]
+            top = min([b[1] for b in boxes] + [dtop]); bot = max([b[3] for b in boxes] + [dbot])
+            parts, w = [], 0
+            for c, b in zip(txt, boxes):
+                t = Image.new("L", (b[2] - b[0] + 8, bot - top), 0)
+                ImageDraw.Draw(t).text((4 - b[0], -top), c, font=ft, fill=255)
+                bb = t.getbbox()
+                if trim and bb:
+                    t = t.crop((bb[0], 0, bb[2], t.height))      # trim sideways only, keep the vertical position
+                parts.append(t); w += t.width
+            canvas = Image.new("L", (int(w + FONT_TRACK / sc * len(txt)) + 1, bot - top), 0)
+            px = 0
+            for t in parts:
+                canvas.paste(t, (int(px), 0), t); px += t.width + FONT_TRACK / sc
+            img = canvas.resize((max(1, round(canvas.width * sc)), max(1, round(canvas.height * sc))), Image.LANCZOS)
+            return img, round((dtop - top) * sc)             # (image, how far its top sits ABOVE the digit top)
+    else:
+        ft = ImageFont.truetype(FONT_PATH, 72)
+        top, bot = ft.getbbox("0")[1], ft.getbbox("0")[3]
+        sx, sy = NUM_CW / 72.0, NUM_H / float(bot - top)
+
+        def seg(txt, trim):
+            t = Image.new("L", (72 * len(txt) + 8, 96), 0)
+            ImageDraw.Draw(t).text((0, 0), txt, font=ft, fill=255)
+            t = t.crop((0, top, 72 * len(txt), bot))
+            if trim:
+                t = t.crop(t.getbbox())
+            return t.resize((max(1, round(t.width * sx)), NUM_H), Image.NEAREST), 0
 
     x = NUM_X
     alpha = Image.new("L", size, 0)
     for txt, trim, gap in ((str(count), False, NUM_GAP), ("/", True, NUM_GAP), (str(goal), False, 0)):
-        s_ = seg(txt, trim)
-        alpha.paste(s_, (x, NUM_Y), s_)
+        s_, up = seg(txt, trim)
+        alpha.paste(s_, (x, NUM_Y - up), s_)
         x += s_.width + gap
     global _NUM_END
     _NUM_END = x
+    if NUM_BOLD:
+        alpha = alpha.filter(ImageFilter.MaxFilter(2 * NUM_BOLD + 1)).filter(ImageFilter.GaussianBlur(NUM_BOLD * 0.5))
+        alpha = alpha.point(lambda v: min(255, int(v * 1.6)))     # re-sharpen the rounded edge
     return _displace_alpha(alpha)
 
 
 def _over(dst, rgb, a):
     return dst * (1 - a) + rgb * a
+
+
+def _paint_number(out, na):
+    """Crimson glass number on top of `out` (H,W,3 float 0..1). `na` = number alpha mask (PIL "L", banner space)."""
+    from scipy.ndimage import gaussian_filter
+    n = np.asarray(na, dtype=np.float32) / 255.0                       # H,W in 0..1
+    H, W = n.shape
+    blur = lambda r: np.asarray(na.filter(ImageFilter.GaussianBlur(r)), dtype=np.float32) / 255.0
+    shift = lambda a, dy, dx: np.roll(a, (dy, dx), axis=(0, 1))
+    rgb = lambda c: np.array(c, np.float32) / 255.0
+
+    # 1) tight, crisp glow (screen blend): small radii = sharp neon-glass edge, big radii = faint haze
+    glow = np.clip(sum(k * blur(r) for r, k in NUM_GLOW_RADII), 0, 1)[..., None] * rgb(NUM_GLOW_COLOR)
+    out = 1 - (1 - np.clip(out, 0, 1)) * (1 - glow)
+    # 2) soft dark shadow
+    s = NUM_SHADOW
+    out = _over(out, rgb(s["color"]), (shift(blur(s["radius"]), s["dy"], s["dx"]) * s["opacity"])[..., None])
+    # 3) body: dark at the stroke edge (glass thickness), bright crimson in the core
+    depth = np.clip((blur(NUM_DEPTH) - 0.5) / 0.5, 0, 1)[..., None]
+    body = rgb(NUM_EDGE) * (1 - depth) + rgb(NUM_CORE) * depth
+    #    texture: fine grain + soft mottling (fixed seed, so it doesn't flicker between renders)
+    t = NUM_TEXTURE
+    if t["grain"] or t["mottle"]:
+        rs = np.random.RandomState(t["seed"])
+        grain = gaussian_filter(rs.normal(0, 1, (H, W)).astype(np.float32), 0.8) * 2.0
+        mottle = _smooth_noise((H, W), (36, 64), rs) + 0.5 * _smooth_noise((H, W), (110, 200), rs)
+        body = np.clip(body * (1 + (t["grain"] * grain + t["mottle"] * mottle)[..., None]), 0, 1)
+    # 4) glass edges: dark bottom-right rim, glossy sheen band under the top edge, thin sharp white rim on the top-left edge
+    r_ = NUM_RIM_DARK
+    rim = np.clip(n - shift(n, -r_["dy"], -r_["dx"]), 0, 1)[..., None]
+    body = body * (1 - rim * r_["opacity"])
+    h_ = NUM_SHEEN
+    sheen = gaussian_filter(np.clip(n - shift(n, h_["dy"], h_["dx"]), 0, 1), 1.5)[..., None] * h_["opacity"]
+    body = body * (1 - sheen) + rgb(h_["color"]) * sheen
+    p_ = NUM_SPEC
+    spec = np.clip(n - shift(n, p_["dy"], p_["dx"]), 0, 1)[..., None] * p_["opacity"]
+    body = body * (1 - spec) + rgb(p_["color"]) * spec
+    return _over(out, body, (n * NUM_OPACITY)[..., None])
 
 
 def _shape_to_banner(img, mode):
@@ -351,22 +425,9 @@ def render_banner(count, goal=None, out_path="banner.jpg"):
     sglow = sum(k * np.asarray(sg.filter(ImageFilter.GaussianBlur(rr)), dtype=np.float32) / 255.0 for rr, k in STAR_GLOW)
     out = 1 - (1 - np.clip(out, 0, 1)) * (1 - np.clip(sglow, 0, 1))
 
-    # ---- number: light glow -> dark shadow -> white opposite shadow -> text ----
+    # ---- number: crimson glass (crisp glow -> shadow -> textured body -> glossy rims) ----
     na = _shape_to_banner(num_alpha, "L").filter(ImageFilter.GaussianBlur(0.5))
-    n = np.asarray(na, dtype=np.float32)[..., None] / 255.0
-    g = NUM_GLOW
-    ng = np.asarray(na.filter(ImageFilter.GaussianBlur(g["radius"])), dtype=np.float32)[..., None] / 255.0
-    out = _over(out, np.array(g["color"], np.float32) / 255.0, np.clip(ng * 1.6, 0, 1) * g["opacity"])
-    s = NUM_SHADOW
-    nsh = np.asarray(na.filter(ImageFilter.GaussianBlur(s["radius"])), dtype=np.float32)[..., None] / 255.0
-    nsh = np.roll(nsh, (s["dy"], s["dx"]), axis=(0, 1)) * s["opacity"]
-    out = _over(out, np.array(s["color"], np.float32) / 255.0, nsh)
-    w = NUM_LIGHT
-    nw = np.asarray(na.filter(ImageFilter.GaussianBlur(w["radius"])), dtype=np.float32)[..., None] / 255.0
-    nw = np.roll(nw, (w["dy"], w["dx"]), axis=(0, 1)) * w["opacity"]
-    out = _over(out, np.array(w["color"], np.float32) / 255.0, np.clip(nw, 0, 1))
-    col = np.array(NUM_COLOR, np.float32) / 255.0 * (1 - 0.12) + bgblur * 0.12     # tiny tint so it sits in the image
-    out = _over(out, col, n * NUM_OPACITY)
+    out = _paint_number(out, na)
 
     rgb8 = Image.fromarray((np.clip(out, 0, 1) * 255).astype(np.uint8), "RGB")
     for q in (95, 90, 85, 80, 70):                                    # YouTube limit: 6 MB
@@ -377,7 +438,8 @@ def render_banner(count, goal=None, out_path="banner.jpg"):
 
 
 def _bar_layer_size():
-    return Image.open(TRACK_PATH).size
+    w, h = Image.open(TRACK_PATH).size
+    return (w + 700, h)          # extra room on the right so long numbers + the heart are never clipped
 
 
 if __name__ == "__main__":
