@@ -16,6 +16,7 @@ LIVE and working end to end (channel banner updates when the sub count changes).
 
 ## Files
 assets/bg.png banner without the bar | assets/track.png empty bar (made by prepare_track.py from bar_original.png)
+| assets/vtks_noise.ttf VTKS Noise font used for subscriber count
 assets/fill.png user's full noisy gradient | assets/PressStart2P-Regular.ttf (SIL OFL)
 render.py constants at top: SCALE, OFFSET, FILL_BOX, NUM_XY, NUM_SIZE, glow strengths, GOALS
 

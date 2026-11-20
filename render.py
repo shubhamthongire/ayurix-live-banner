@@ -5,11 +5,11 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 # ---- paths / geometry (measured from the AE composition) ----
 BG_PATH, TRACK_PATH, FILL_PATH = "assets/bg.png", "assets/track.png", "assets/fill.png"
-FONT_PATH = "assets/Mostwasted.ttf"
+FONT_PATH = "assets/vtks_noise.ttf"
 GOALS = [100, 250, 500, 1000, 2500, 5000, 10000]   # goal = first value > count
 SCALE, OFFSET = 0.3325, (71, 612)  # bar-PNG (2171x724) -> banner scale / top-left
 FILL_BOX = (350, 358, 1690, 424)   # inner track area in bar-PNG pixels
-NUM_X, NUM_Y, NUM_H, NUM_CW, NUM_GAP = 700, 303, 175, 105, 36   # left, top, height, char width, gap around "/" (bar-PNG px)
+NUM_X, NUM_Y, NUM_H, NUM_CW, NUM_GAP = 1450, 303, 115, 105, 36   # left, top, height, char width, gap around "/" (bar-PNG px)
 FONT_SMOOTH = True    # False = pixel font (Press Start 2P, monospace, hard edges). True = normal/script font: any width, smooth edges
 FONT_TRACK = 4        # smooth fonts only: extra space between characters (bar-PNG px)
 NUM_BOLD = 3          # thickens the number: grows every stroke by this many bar-PNG px per side (0 = off). Makes thin fonts look "fat"
@@ -21,6 +21,10 @@ HEART_SIZE = (0.85, 1.25)          # random size range; seeded by the sub count 
 HEART_GAP = 75                     # gap between number end and heart (bar-PNG px)
 HEART_TURB = 0.05                  # fine wobble on the heart itself (fraction of its height); same random seed as the wave
 HEART_DY = 0                       # extra vertical nudge (+ = down)
+HEART_OPACITY = 1.18               # increase the isolated heart's alpha/clarity
+HEART_RGB_GAIN = 1.20              # strengthen the heart's red pixels
+HEART_GLOW_BLUR = 18               # soft glow radius in bar-PNG pixels
+HEART_GLOW_OPACITY = 0.38           # strength of the crimson glow behind the heart
 _NUM_END = 0                       # x where the number ends (set by _number_layer)
 
 # ---- look (tune these) ----
@@ -275,9 +279,23 @@ def _heart_layer(count):
     pm = np.dstack([map_coordinates(pm[..., i], [Y - ndy, X - ndx], order=1, mode="constant", cval=0) for i in range(4)])
     al = pm[..., 3:4]
     rgb = np.where(al > 1e-4, pm[..., :3] / np.maximum(al, 1e-4), 0)
+    pink = (rgb[..., 0] > rgb[..., 1] * 1.25) & (rgb[..., 0] > rgb[..., 2] * 1.10)
+    crimson = rgb.copy()
+    crimson[..., 0] = np.clip(crimson[..., 0] * 1.05, 0, 1)
+    crimson[..., 1] *= 0.18
+    crimson[..., 2] *= 0.32
+    rgb = np.where(pink[..., None], crimson, rgb)
+    al = np.clip(al * HEART_OPACITY, 0, 1)
     tile = Image.fromarray((np.dstack([np.clip(rgb, 0, 1), np.clip(al, 0, 1)]) * 255).astype(np.uint8), "RGBA")
     layer = Image.new("RGBA", size, (0, 0, 0, 0))
-    layer.alpha_composite(tile, (round(cx - tile.width / 2.0), round(cy + dy - tile.height / 2.0)))
+    px = round(cx - tile.width / 2.0)
+    py = round(cy + dy - tile.height / 2.0)
+    glow_alpha = tile.getchannel("A").filter(ImageFilter.GaussianBlur(HEART_GLOW_BLUR))
+    glow_alpha = glow_alpha.point(lambda v: round(v * HEART_GLOW_OPACITY))
+    glow = Image.new("RGBA", tile.size, (255, 18, 48, 0))
+    glow.putalpha(glow_alpha)
+    layer.alpha_composite(glow, (px, py))
+    layer.alpha_composite(tile, (px, py))
     return layer
 
 
@@ -321,10 +339,9 @@ def _number_layer(size, count, goal):
 
     x = NUM_X
     alpha = Image.new("L", size, 0)
-    for txt, trim, gap in ((str(count), False, NUM_GAP), ("/", True, NUM_GAP), (str(goal), False, 0)):
-        s_, up = seg(txt, trim)
-        alpha.paste(s_, (x, NUM_Y - up), s_)
-        x += s_.width + gap
+    s_, up = seg(str(count), False)
+    alpha.paste(s_, (x, NUM_Y - up), s_)
+    x += s_.width
     global _NUM_END
     _NUM_END = x
     if NUM_BOLD:
@@ -338,41 +355,14 @@ def _over(dst, rgb, a):
 
 
 def _paint_number(out, na):
-    """Crimson glass number on top of `out` (H,W,3 float 0..1). `na` = number alpha mask (PIL "L", banner space)."""
-    from scipy.ndimage import gaussian_filter
+    """Flat white VTKS Noise number on top of `out`."""
     n = np.asarray(na, dtype=np.float32) / 255.0                       # H,W in 0..1
-    H, W = n.shape
     blur = lambda r: np.asarray(na.filter(ImageFilter.GaussianBlur(r)), dtype=np.float32) / 255.0
     shift = lambda a, dy, dx: np.roll(a, (dy, dx), axis=(0, 1))
     rgb = lambda c: np.array(c, np.float32) / 255.0
-
-    # 1) tight, crisp glow (screen blend): small radii = sharp neon-glass edge, big radii = faint haze
-    glow = np.clip(sum(k * blur(r) for r, k in NUM_GLOW_RADII), 0, 1)[..., None] * rgb(NUM_GLOW_COLOR)
-    out = 1 - (1 - np.clip(out, 0, 1)) * (1 - glow)
-    # 2) soft dark shadow
-    s = NUM_SHADOW
-    out = _over(out, rgb(s["color"]), (shift(blur(s["radius"]), s["dy"], s["dx"]) * s["opacity"])[..., None])
-    # 3) body: dark at the stroke edge (glass thickness), bright crimson in the core
-    depth = np.clip((blur(NUM_DEPTH) - 0.5) / 0.5, 0, 1)[..., None]
-    body = rgb(NUM_EDGE) * (1 - depth) + rgb(NUM_CORE) * depth
-    #    texture: fine grain + soft mottling (fixed seed, so it doesn't flicker between renders)
-    t = NUM_TEXTURE
-    if t["grain"] or t["mottle"]:
-        rs = np.random.RandomState(t["seed"])
-        grain = gaussian_filter(rs.normal(0, 1, (H, W)).astype(np.float32), 0.8) * 2.0
-        mottle = _smooth_noise((H, W), (36, 64), rs) + 0.5 * _smooth_noise((H, W), (110, 200), rs)
-        body = np.clip(body * (1 + (t["grain"] * grain + t["mottle"] * mottle)[..., None]), 0, 1)
-    # 4) glass edges: dark bottom-right rim, glossy sheen band under the top edge, thin sharp white rim on the top-left edge
-    r_ = NUM_RIM_DARK
-    rim = np.clip(n - shift(n, -r_["dy"], -r_["dx"]), 0, 1)[..., None]
-    body = body * (1 - rim * r_["opacity"])
-    h_ = NUM_SHEEN
-    sheen = gaussian_filter(np.clip(n - shift(n, h_["dy"], h_["dx"]), 0, 1), 1.5)[..., None] * h_["opacity"]
-    body = body * (1 - sheen) + rgb(h_["color"]) * sheen
-    p_ = NUM_SPEC
-    spec = np.clip(n - shift(n, p_["dy"], p_["dx"]), 0, 1)[..., None] * p_["opacity"]
-    body = body * (1 - spec) + rgb(p_["color"]) * spec
-    return _over(out, body, (n * NUM_OPACITY)[..., None])
+    shadow = shift(blur(4.0), 7, 3) * 0.72
+    out = _over(out, rgb((20, 10, 18)), shadow[..., None])
+    return _over(out, rgb((255, 255, 255)), (n * 1.0)[..., None])
 
 
 def _shape_to_banner(img, mode):
